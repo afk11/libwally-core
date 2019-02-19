@@ -15,6 +15,35 @@ static const unsigned char SEED[] = {
     'B', 'i', 't', 'c', 'o', 'i', 'n', ' ', 's', 'e', 'e', 'd'
 };
 
+const struct version_def bitcoin_version_p2pkh_or_p2sh = { 
+    .public = 0x0488b21e, .private = 0x0488ade4
+};
+const struct version_def bitcoin_version_p2sh_p2wpkh = { 
+   .public = 0x049d7cb2, .private = 0x049d7878 
+};
+const struct version_def bitcoin_version_p2wpkh = { 
+    .public = 0x04b24746, .private = 0x04b2430c
+};
+const struct version_def bitcoin_version_p2sh_p2wsh = { 
+    .public = 0x0295b43f, .private = 0x0295b005
+};
+const struct version_def bitcoin_version_p2wsh = { 
+    .public = 0x02aa7ed3, .private = 0x02aa7a99
+};
+const struct version_def *bitcoin_versions[] = {
+	&bitcoin_version_p2pkh_or_p2sh,
+	&bitcoin_version_p2sh_p2wpkh,
+	&bitcoin_version_p2wpkh,
+	&bitcoin_version_p2sh_p2wsh,
+	&bitcoin_version_p2wsh,
+};
+const struct version_def testnet_version_p2pkh_or_p2sh = {
+	.public = 0x043587CF, .private = 0x04358394,
+};
+const struct version_def *testnet_versions = {
+	&testnet_version_p2pkh_or_p2sh,
+};
+
 /* LCOV_EXCL_START */
 /* Check assumptions we expect to hold true */
 static void assert_bip32_assumptions(void)
@@ -64,6 +93,14 @@ static bool mem_is_zero(const void *mem, size_t len)
 static bool child_is_hardened(uint32_t child_num)
 {
     return child_num >= BIP32_INITIAL_HARDENED_CHILD;
+}
+
+static bool slip132_version_is_valid(uint32_t ver, const struct version_def* definition, uint32_t flags)
+{
+    if (ver == definition->private) {
+	return true;
+    }
+    return flags == BIP32_FLAG_KEY_PUBLIC && ver == definition->public;
 }
 
 static bool version_is_valid(uint32_t ver, uint32_t flags)
@@ -202,8 +239,13 @@ static bool key_is_valid(const struct ext_key *hdkey)
     bool is_master = !hdkey->depth;
     uint8_t ver_flags = is_private ? BIP32_FLAG_KEY_PRIVATE : BIP32_FLAG_KEY_PUBLIC;
 
-    if (!version_is_valid(hdkey->version, ver_flags))
-        return false;
+    if (hdkey->key_versions != NULL) {
+        if (!slip132_version_is_valid(hdkey->version, hdkey->key_versions, ver_flags))
+            return false;
+    } else {
+        if (!version_is_valid(hdkey->version, ver_flags))
+            return false;
+    }
 
     if (mem_is_zero(hdkey->chain_code, sizeof(hdkey->chain_code)) ||
         (hdkey->pub_key[0] != 0x2 && hdkey->pub_key[0] != 0x3) ||
@@ -243,14 +285,22 @@ int bip32_key_serialize(const struct ext_key *hdkey, uint32_t flags,
         !bytes_out || len != BIP32_SERIALIZED_LEN)
         return WALLY_EINVAL;
 
-    tmp32 = hdkey->version;
-    if (!serialize_private) {
-        /* Change version if serializing the public part of a private key */
-        if (tmp32 == BIP32_VER_MAIN_PRIVATE)
-            tmp32 = BIP32_VER_MAIN_PUBLIC;
-        else if (tmp32 == BIP32_VER_TEST_PRIVATE)
-            tmp32 = BIP32_VER_TEST_PUBLIC;
+    if (hdkey->key_versions != NULL) {
+        if (serialize_private)
+            tmp32 = hdkey->key_versions->private;
+        else
+            tmp32 = hdkey->key_versions->public;
+    } else {
+        tmp32 = hdkey->version;
+        if (!serialize_private) {
+            /* Change version if serializing the public part of a private key */
+            if (tmp32 == BIP32_VER_MAIN_PRIVATE)
+                tmp32 = BIP32_VER_MAIN_PUBLIC;
+            else if (tmp32 == BIP32_VER_TEST_PRIVATE)
+                tmp32 = BIP32_VER_TEST_PUBLIC;
+        }
     }
+
     tmp32_be = cpu_to_be32(tmp32);
     out = copy_out(out, &tmp32_be, sizeof(tmp32_be));
 
@@ -286,7 +336,9 @@ static int wipe_key_fail(struct ext_key *key_out)
     return WALLY_EINVAL;
 }
 
-int bip32_key_unserialize(const unsigned char *bytes, size_t bytes_len,
+static int key_unserialize(const unsigned char *bytes, size_t bytes_len,
+                          size_t num_versions,
+                          const struct version_def* versions[],
                           struct ext_key *key_out)
 {
     if (!bytes || bytes_len != BIP32_SERIALIZED_LEN || !key_out)
@@ -296,8 +348,20 @@ int bip32_key_unserialize(const unsigned char *bytes, size_t bytes_len,
 
     bytes = copy_in(&key_out->version, bytes, sizeof(key_out->version));
     key_out->version = be32_to_cpu(key_out->version);
-    if (!version_is_valid(key_out->version, BIP32_FLAG_KEY_PUBLIC))
-        return wipe_key_fail(key_out);
+    key_out->key_versions = NULL;
+
+    if (num_versions > 0) {
+        for (size_t i = 0; key_out->key_versions == NULL && i < num_versions; i++) {
+            if (key_out->version == versions[i]->public ||
+                key_out->version == versions[i]->private)
+                key_out->key_versions = versions[i];
+        }
+        if (!key_out->key_versions)
+            return wipe_key_fail(key_out);
+    } else {
+        if (!version_is_valid(key_out->version, BIP32_FLAG_KEY_PUBLIC))
+            return wipe_key_fail(key_out);
+    }
 
     bytes = copy_in(&key_out->depth, bytes, sizeof(key_out->depth));
 
@@ -311,24 +375,46 @@ int bip32_key_unserialize(const unsigned char *bytes, size_t bytes_len,
     bytes = copy_in(key_out->chain_code, bytes, sizeof(key_out->chain_code));
 
     if (bytes[0] == BIP32_FLAG_KEY_PRIVATE) {
-        if (key_out->version == BIP32_VER_MAIN_PUBLIC ||
-            key_out->version == BIP32_VER_TEST_PUBLIC)
-            return wipe_key_fail(key_out); /* Private key data in public key */
-
+        if (key_out->key_versions) {
+            if (key_out->version == key_out->key_versions->public)
+                return wipe_key_fail(key_out); /* Private key data in public key */
+        } else {
+            if (key_out->version == BIP32_VER_MAIN_PUBLIC ||
+                key_out->version == BIP32_VER_TEST_PUBLIC)
+                return wipe_key_fail(key_out); /* Private key data in public key */
+        }
         copy_in(key_out->priv_key, bytes, sizeof(key_out->priv_key));
         if (key_compute_pub_key(key_out) != WALLY_OK)
             return wipe_key_fail(key_out);
     } else {
-        if (key_out->version == BIP32_VER_MAIN_PRIVATE ||
-            key_out->version == BIP32_VER_TEST_PRIVATE)
-            return wipe_key_fail(key_out); /* Public key data in private key */
-
+        if (key_out->key_versions) {
+            if (key_out->version == key_out->key_versions->private)
+                return wipe_key_fail(key_out); /* Public key data in private key */
+        } else {
+            if (key_out->version == BIP32_VER_MAIN_PRIVATE ||
+                key_out->version == BIP32_VER_TEST_PRIVATE)
+                return wipe_key_fail(key_out); /* Public key data in private key */
+        }
         copy_in(key_out->pub_key, bytes, sizeof(key_out->pub_key));
         key_strip_private_key(key_out);
     }
 
     key_compute_hash160(key_out);
     return WALLY_OK;
+}
+
+int bip32_key_unserialize(const unsigned char *bytes, size_t bytes_len,
+                          struct ext_key *output)
+{
+    return key_unserialize(bytes, bytes_len, 0, NULL, output);
+}
+
+int slip132_key_unserialize(const unsigned char *bytes, size_t bytes_len,
+                            size_t num_versions,
+                            const struct version_def* versions[],
+                            struct ext_key *output)
+{
+    return key_unserialize(bytes, bytes_len, num_versions, versions, output);
 }
 
 int bip32_key_unserialize_alloc(const unsigned char *bytes, size_t bytes_len,
@@ -464,23 +550,30 @@ int bip32_key_from_parent(const struct ext_key *hdkey, uint32_t child_num,
         }
     }
 
-    if (derive_private) {
-        if (version_is_mainnet(hdkey->version))
-            key_out->version = BIP32_VER_MAIN_PRIVATE;
+    if (hdkey->key_versions) {
+        if (derive_private)
+            key_out->version = hdkey->key_versions->private;
         else
-            key_out->version = BIP32_VER_TEST_PRIVATE;
-
+            key_out->version = hdkey->key_versions->public;
     } else {
-        if (version_is_mainnet(hdkey->version))
-            key_out->version = BIP32_VER_MAIN_PUBLIC;
-        else
-            key_out->version = BIP32_VER_TEST_PUBLIC;
-
-        key_strip_private_key(key_out);
+        if (derive_private) {
+            if (version_is_mainnet(hdkey->version))
+                key_out->version = BIP32_VER_MAIN_PRIVATE;
+            else
+                key_out->version = BIP32_VER_TEST_PRIVATE;
+        } else {
+            if (version_is_mainnet(hdkey->version))
+                key_out->version = BIP32_VER_MAIN_PUBLIC;
+            else
+                key_out->version = BIP32_VER_TEST_PUBLIC;
+            key_strip_private_key(key_out);
+        }
     }
 
     key_out->depth = hdkey->depth + 1;
     key_out->child_num = child_num;
+    key_out->key_versions = hdkey->key_versions;
+
     if (flags & BIP32_FLAG_SKIP_HASH)
         wally_clear_2(&key_out->parent160, sizeof(key_out->parent160),
                       &key_out->hash160, sizeof(key_out->hash160));
@@ -564,6 +657,7 @@ int bip32_key_init_alloc(uint32_t version, uint32_t depth, uint32_t child_num,
                          const unsigned char *priv_key, size_t priv_key_len,
                          const unsigned char *hash160, size_t hash160_len,
                          const unsigned char *parent160, size_t parent160_len,
+                         const struct version_def* key_versions,
                          struct ext_key **output)
 {
     struct ext_key *key_out;
@@ -600,7 +694,10 @@ int bip32_key_init_alloc(uint32_t version, uint32_t depth, uint32_t child_num,
     key_out->version = version;
     key_out->depth = depth;
     key_out->child_num = child_num;
-
+    key_out->key_versions = NULL;
+    if (key_versions)
+	key_out->key_versions = key_versions;
+ 
     memcpy(key_out->chain_code, chain_code, key_size(chain_code));
     if (priv_key && version != BIP32_VER_MAIN_PUBLIC && version != BIP32_VER_TEST_PUBLIC)
         memcpy(key_out->priv_key + 1, priv_key, key_size(priv_key) - 1);
@@ -663,6 +760,27 @@ int bip32_key_from_base58(const char *base58,
     return ret;
 }
 
+int slip132_key_from_base58(const char *base58,
+                            size_t num_versions,
+                            const struct version_def* versions[],
+                            struct ext_key *output)
+{
+    int ret;
+    unsigned char bytes[BIP32_SERIALIZED_LEN + BASE58_CHECKSUM_LEN];
+    size_t written;
+
+    if ((ret = wally_base58_to_bytes(base58, BASE58_FLAG_CHECKSUM, bytes, sizeof(bytes), &written)))
+        return ret;
+
+    if (written != BIP32_SERIALIZED_LEN)
+        ret = WALLY_EINVAL;
+    else
+        ret = slip132_key_unserialize(bytes, BIP32_SERIALIZED_LEN, num_versions, versions, output);
+
+    wally_clear(bytes, sizeof(bytes));
+    return ret;
+}
+
 int bip32_key_from_base58_alloc(const char *base58,
                                 struct ext_key **output)
 {
@@ -677,6 +795,21 @@ int bip32_key_from_base58_alloc(const char *base58,
     return ret;
 }
 
+int slip132_key_from_base58_alloc(const char *base58,
+                                  size_t num_versions,
+                                  const struct version_def* versions[],
+                                  struct ext_key **output)
+{
+    int ret;
+
+    ALLOC_KEY();
+    ret = slip132_key_from_base58(base58, num_versions, versions, *output);
+    if (ret) {
+        wally_free(*output);
+        *output = 0;
+    }
+    return ret;
+}
 #if defined (SWIG_JAVA_BUILD) || defined (SWIG_PYTHON_BUILD) || defined (SWIG_JAVASCRIPT_BUILD)
 
 /* Getters for ext_key values */

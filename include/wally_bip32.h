@@ -31,6 +31,11 @@ extern "C" {
 #define BIP32_VER_TEST_PUBLIC  0x043587CF
 #define BIP32_VER_TEST_PRIVATE 0x04358394
 
+struct version_def {
+    uint32_t public;
+    uint32_t private;
+};
+
 #ifdef SWIG
 struct ext_key;
 #else
@@ -54,6 +59,8 @@ struct ext_key {
     unsigned char pad2[3];
     /** The public key with prefix byte 0x2 or 0x3 */
     unsigned char pub_key[33];
+    /** Pointer to the version definition, if custom prefixes are used. */
+    const struct version_def* key_versions;
 };
 #endif /* SWIG */
 
@@ -84,6 +91,7 @@ WALLY_CORE_API int bip32_key_init_alloc(
     size_t hash160_len,
     const unsigned char *parent160,
     size_t parent160_len,
+    const struct version_def* key_versions,
     struct ext_key **output);
 
 #ifndef SWIG
@@ -124,7 +132,8 @@ WALLY_CORE_API int bip32_key_from_seed_alloc(
     struct ext_key **output);
 
 /**
- * Serialize an extended key to memory using BIP32 format.
+ * Serialize an extended key to memory using BIP32 format. Supports
+ * custom key prefixes.
  *
  * :param hdkey: The extended key to serialize.
  * :param flags: BIP32_FLAG_KEY_ Flags indicating which key to serialize. You can not
@@ -151,6 +160,23 @@ WALLY_CORE_API int bip32_key_unserialize(
     const unsigned char *bytes,
     size_t bytes_len,
     struct ext_key *output);
+
+/**
+ * Un-serialize a SLIP132 prefixed extended key from memory, only
+ * allowing keys with a prefix defined in ``versions``.
+ *
+ * :param bytes: Storage holding the serialized key.
+ * :param bytes_len: Size of ``bytes`` in bytes. Must be ``BIP32_SERIALIZED_LEN``.
+ * :param num_versions: Length of ``versions`` array.
+ * :param versions: List of accepted version definitions.
+ * :param output: Destination for the resulting extended key.
+ */
+WALLY_CORE_API int slip132_key_unserialize(
+    const unsigned char *bytes,
+    size_t bytes_len,
+    size_t num_versions,
+    const struct version_def* versions[],
+    struct ext_key *output);
 #endif
 
 /**
@@ -161,6 +187,18 @@ WALLY_CORE_API int bip32_key_unserialize(
 WALLY_CORE_API int bip32_key_unserialize_alloc(
     const unsigned char *bytes,
     size_t bytes_len,
+    struct ext_key **output);
+
+/**
+ * As per `slip132_key_unserialize`, but allocates the key.
+ *
+ * .. note:: The returned key should be freed with `bip32_key_free`.
+ */
+WALLY_CORE_API int slip132_key_unserialize_alloc(
+    const unsigned char *bytes,
+    size_t bytes_len,
+    size_t num_versions,
+    const struct version_def* versions[],    
     struct ext_key **output);
 
 #ifndef SWIG
@@ -226,7 +264,8 @@ WALLY_CORE_API int bip32_key_from_parent_path_alloc(
     struct ext_key **output);
 
 /**
- * Convert an extended key to base58.
+ * Convert an extended key to base58. Keys using custom prefixes
+ * are supported.
  *
  * :param hdkey: The extended key.
  * :param flags: BIP32_FLAG_KEY_ Flags indicating which key to serialize. You can not
@@ -242,11 +281,26 @@ WALLY_CORE_API int bip32_key_to_base58(
 /**
  * Convert a base58 encoded extended key to an extended key.
  *
- * :param wif: The extended key in base58.
+ * :param base58: The extended key in base58.
  * :param output: Destination for the resulting extended key.
  */
 WALLY_CORE_API int bip32_key_from_base58(
     const char *base58,
+    struct ext_key *output);
+
+/**
+ * Convert a base58 encoded extended key, using custom prefixes,
+ * to an extended key.
+ *
+ * :param base58: The extended key in base58.
+ * :param num_versions: Length of versions array.
+ * :param versions: List of accepted version definitions.
+ * :param output: Destination for the resulting extended key.
+ */
+WALLY_CORE_API int slip132_key_from_base58(
+    const char *base58,
+    size_t num_versions,
+    const struct version_def* versions[],
     struct ext_key *output);
 #endif
 
@@ -259,6 +313,16 @@ WALLY_CORE_API int bip32_key_from_base58_alloc(
     const char *base58,
     struct ext_key **output);
 
+/**
+ * As per `slip132_key_from_base58`, but allocates the key.
+ *
+ * .. note:: The returned key should be freed with `bip32_key_free`.
+ */
+WALLY_CORE_API int slip132_key_from_base58_alloc(
+    const char *base58,
+    size_t num_versions,
+    const struct version_def* versions[],
+    struct ext_key **output);
 #ifdef __cplusplus
 }
 #endif
