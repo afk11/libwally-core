@@ -227,6 +227,11 @@ noinst_PROGRAMS += test_tx
 test_tx_SOURCES = ctest/test_tx.c
 test_tx_CFLAGS = -I$(top_srcdir)/include $(AM_CFLAGS)
 test_tx_LDADD = $(lib_LTLIBRARIES) @CTEST_EXTRA_STATIC@
+TESTS += test_bip32
+noinst_PROGRAMS += test_bip32
+test_bip32_SOURCES = ctest/test_bip32.c
+test_bip32_CFLAGS = -I$(top_srcdir)/include $(AM_CFLAGS)
+test_bip32_LDADD = $(lib_LTLIBRARIES) @CTEST_EXTRA_STATIC@
 if BUILD_ELEMENTS
 TESTS += test_elements_tx
 noinst_PROGRAMS += test_elements_tx
